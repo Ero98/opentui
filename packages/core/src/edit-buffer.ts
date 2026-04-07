@@ -299,6 +299,16 @@ export class EditBuffer extends EventEmitter {
     return this.lib.decoder.decode(textBytes)
   }
 
+  public getAsciiCharLastOffset(startOffset: number, endOffset: number, targetChar: string): number {
+    this.guard()
+    if (startOffset >= endOffset) return -1
+    if (targetChar.length !== 1) return -1
+    const charCode = targetChar.charCodeAt(0)
+    if (charCode > 127) return -1 // Only support ASCII for now
+
+    return this.lib.editBufferGetAsciiCharLastOffset(this.bufferPtr, startOffset, endOffset, charCode)
+  }
+
   public debugLogRope(): void {
     this.guard()
     this.lib.editBufferDebugLogRope(this.bufferPtr)

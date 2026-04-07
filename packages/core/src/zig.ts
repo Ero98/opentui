@@ -928,6 +928,10 @@ function getOpenTUILib(libPath?: string) {
       args: ["ptr", "u32", "u32", "u32", "u32", "ptr", "usize"],
       returns: "usize",
     },
+    editBufferGetAsciiCharLastOffset: {
+      args: ["ptr", "u32", "u32", "u8"],
+      returns: "i32",
+    },
 
     // EditorView selection and editing methods
     editorViewSetSelection: {

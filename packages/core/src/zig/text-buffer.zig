@@ -1177,4 +1177,27 @@ pub const UnifiedTextBuffer = struct {
         const end_offset = iter_mod.coordsToOffset(&self._rope, end_row, end_col) orelse return 0;
         return self.getTextRange(start_offset, end_offset, out_buffer);
     }
+
+    /// Find target ascii char last offset within a range of display-width offsets
+    /// Automatically snaps to grapheme boundaries:
+    /// Returns target ascii char last offset, -1 if not found
+    pub fn getAsciiCharLastOffset(self: *const Self, start_offset: u32, end_offset: u32, target_char: u8) i32 {
+        if (start_offset >= end_offset) return -1;
+        if (target_char > 127) return -1; // Only support ASCII for now
+
+        const total_weight = self._rope.totalWeight();
+        if (start_offset >= total_weight) return -1;
+
+        const clamped_end = @min(end_offset, total_weight);
+
+        return iter_mod.findAsciiCharLastOffsetBetweenOffsets(
+            &self._rope,
+            &self.mem_registry,
+            self.tab_width,
+            start_offset,
+            clamped_end,
+            target_char,
+            self.width_method,
+        );
+    }
 };

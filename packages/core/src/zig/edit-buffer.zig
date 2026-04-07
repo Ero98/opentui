@@ -822,4 +822,13 @@ pub const EditBuffer = struct {
     pub fn getTextRangeByCoords(self: *EditBuffer, start_row: u32, start_col: u32, end_row: u32, end_col: u32, out_buffer: []u8) usize {
         return self.tb.getTextRangeByCoords(start_row, start_col, end_row, end_col, out_buffer);
     }
+
+    /// Find target ascii char last offset within a range of display-width offsets
+    /// Automatically snaps to grapheme boundaries:
+    /// - start_offset excludes graphemes that start before it
+    /// - end_offset includes graphemes that start before it
+    /// Returns target ascii char last offset, or -1 if not found
+    pub fn getAsciiCharLastOffset(self: *EditBuffer, start_offset: u32, end_offset: u32, target_char: u8) !i32 {
+        return self.tb.getAsciiCharLastOffset(start_offset, end_offset, target_char);
+    }
 };

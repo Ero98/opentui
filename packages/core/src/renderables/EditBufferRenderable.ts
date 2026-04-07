@@ -1139,6 +1139,10 @@ export abstract class EditBufferRenderable extends Renderable implements LineInf
     return this.editBuffer.getTextRangeByCoords(startRow, startCol, endRow, endCol)
   }
 
+  public getAsciiCharLastOffset(startOffset: number, endOffset: number, targetChar: string): number {
+    return this.editBuffer.getAsciiCharLastOffset(startOffset, endOffset, targetChar)
+  }
+
   protected updateSelectionForMovement(shiftPressed: boolean, isBeforeMovement: boolean): void {
     if (!this.selectable) return
 

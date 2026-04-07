@@ -497,3 +497,110 @@ pub fn extractTextBetweenOffsets(
 
     return out_index;
 }
+
+/// Find target asciichar last offset between display-width offsets
+/// Automatically snaps to grapheme boundaries:
+/// - start_offset excludes graphemes that start before it
+/// - end_offset includes graphemes that start before it
+/// Returns target ascii char last offset, -1 if not found
+pub fn findAsciiCharLastOffsetBetweenOffsets(
+    rope: *const UnifiedRope,
+    mem_registry: *const MemRegistry,
+    tab_width: u8,
+    start_offset: u32,
+    end_offset: u32,
+    target_char: u8,
+    width_method: utf8.WidthMethod,
+) i32 {
+    if (start_offset >= end_offset) return -1;
+    if (target_char > 127) return -1; // Only support ASCII for now
+
+    var col_offset: u32 = 0;
+    var last_target_offset: u32 = 0;
+    var is_matched = false;
+
+    _ = width_method; // Just ignore for now, will use .unicode as default
+
+    const Context = struct {
+        rope: *const UnifiedRope,
+        mem_registry: *const MemRegistry,
+        tab_width: u8,
+        col_offset: *u32,
+        start: u32,
+        end: u32,
+        last_target_offset: *u32,
+        is_matched: *bool,
+        fn segment_callback(ctx_ptr: *anyopaque, line_idx: u32, chunk: *const TextChunk, chunk_idx_in_line: u32) void {
+            _ = line_idx;
+            _ = chunk_idx_in_line;
+            const ctx = @as(*@This(), @ptrCast(@alignCast(ctx_ptr)));
+
+            const chunk_start_offset = ctx.col_offset.*;
+            const chunk_end_offset = chunk_start_offset + chunk.width;
+
+            // Skip chunk if it's entirely outside range
+            if (chunk_end_offset <= ctx.start or chunk_start_offset >= ctx.end) {
+                ctx.col_offset.* = chunk_end_offset;
+                return;
+            }
+
+            const chunk_bytes = chunk.getBytes(ctx.mem_registry);
+            const is_ascii_only = (chunk.flags & TextChunk.Flags.ASCII_ONLY) != 0;
+
+            const local_start_col: u32 = if (ctx.start > chunk_start_offset) ctx.start - chunk_start_offset else 0;
+            const local_end_col: u32 = @min(ctx.end - chunk_start_offset, chunk.width);
+
+            var byte_start: u32 = 0;
+            var byte_end: u32 = @intCast(chunk_bytes.len);
+
+            if (local_start_col > 0) {
+                const start_result = utf8.findPosByWidth(chunk_bytes, local_start_col, ctx.tab_width, is_ascii_only, false, .unicode);
+                byte_start = start_result.byte_offset;
+            }
+
+            if (local_end_col < chunk.width) {
+                const end_result = utf8.findPosByWidth(chunk_bytes, local_end_col, ctx.tab_width, is_ascii_only, true, .unicode);
+                byte_end = end_result.byte_offset;
+            }
+
+            if (byte_start < byte_end and byte_start < chunk_bytes.len) {
+                const actual_end = @min(byte_end, @as(u32, @intCast(chunk_bytes.len)));
+                const selected_bytes = chunk_bytes[byte_start..actual_end];
+
+                var i: u32 = selected_bytes.len - 1;
+                while (i >= 0) : (i -= 1) {
+                    if (selected_bytes[i] == target_char) {
+                        const char_offset = chunk_start_offset + local_start_col + utf8.getWidthAt(selected_bytes, i, ctx.tab_width, .unicode);
+                        ctx.last_target_offset.* = char_offset;
+                        ctx.is_matched.* = true;
+                        break;
+                    }
+                }
+            }
+
+            ctx.col_offset.* = chunk_end_offset;
+        }
+
+        fn line_end_callback(ctx_ptr: *anyopaque, line_info: LineInfo) void {
+            _ = line_info;
+            const ctx = @as(*@This(), @ptrCast(@alignCast(ctx_ptr)));
+            // Account for newline in display offset
+            ctx.col_offset.* += 1;
+        }
+    };
+
+    var ctx = Context{
+        .rope = rope,
+        .mem_registry = mem_registry,
+        .tab_width = tab_width,
+        .col_offset = &col_offset,
+        .start = start_offset,
+        .end = end_offset,
+        .last_target_offset = &last_target_offset,
+        .is_matched = &is_matched,
+    };
+
+    walkLinesAndSegments(rope, &ctx, Context.segment_callback, Context.line_end_callback);
+
+    return if (is_matched) last_target_offset else -1;
+}

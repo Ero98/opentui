@@ -1192,6 +1192,10 @@ export fn editBufferGetTextRangeByCoords(edit_buffer: *edit_buffer_mod.EditBuffe
     return edit_buffer.getTextRangeByCoords(start_row, start_col, end_row, end_col, outBuffer);
 }
 
+export fn editBufferGetAsciiCharLastOffset(edit_buffer: *edit_buffer_mod.EditBuffer, start_offset: u32, end_offset: u32, target_char: u8) usize {
+    return edit_buffer.getAsciiCharLastOffset(start_offset, end_offset, target_char) catch 0;
+}
+
 export fn editBufferSetText(edit_buffer: *edit_buffer_mod.EditBuffer, textPtr: [*]const u8, textLen: usize) void {
     const text = textPtr[0..textLen];
     edit_buffer.setText(text) catch {};

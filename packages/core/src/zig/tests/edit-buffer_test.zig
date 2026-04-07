@@ -1140,6 +1140,56 @@ test "EditBuffer - getTextRange multiline with emojis" {
     try std.testing.expectEqualStrings("Line1 👋\nLine2 🎉\nLine3", buffer[0..len]);
 }
 
+// ===== getAsciiCharLastOffset Tests =====
+
+test "EditBuffer - getAsciiCharLastOffset basic ASCII" {
+    const pool = gp.initGlobalPool(std.testing.allocator);
+    defer gp.deinitGlobalPool();
+    const link_pool = link.initGlobalLinkPool(std.testing.allocator);
+    defer link.deinitGlobalLinkPool();
+
+    var eb = try EditBuffer.init(std.testing.allocator, pool, link_pool, .wcwidth);
+    defer eb.deinit();
+
+    try eb.insertText("Hello World");
+
+    const targetChar = 'o';
+    const offset = try eb.getAsciiCharLastOffset(0, 5, targetChar);
+    try std.testing.expectEqual(4, offset);
+}
+
+test "EditBuffer - getAsciiCharLastOffset full text" {
+    const pool = gp.initGlobalPool(std.testing.allocator);
+    defer gp.deinitGlobalPool();
+    const link_pool = link.initGlobalLinkPool(std.testing.allocator);
+    defer link.deinitGlobalLinkPool();
+
+    var eb = try EditBuffer.init(std.testing.allocator, pool, link_pool, .wcwidth);
+    defer eb.deinit();
+
+    try eb.insertText("Hello World");
+
+    const targetChar = 'o';
+    const offset = try eb.getAsciiCharLastOffset(0, 11, targetChar);
+    try std.testing.expectEqual(7, offset);
+}
+
+test "EditBuffer - getAsciiCharLastOffset with emojis in range" {
+    const pool = gp.initGlobalPool(std.testing.allocator);
+    defer gp.deinitGlobalPool();
+    const link_pool = link.initGlobalLinkPool(std.testing.allocator);
+    defer link.deinitGlobalLinkPool();
+
+    var eb = try EditBuffer.init(std.testing.allocator, pool, link_pool, .wcwidth);
+    defer eb.deinit();
+
+    try eb.insertText("Hello 👋 World");
+
+    const targetChar = 'o';
+    const offset = try eb.getAsciiCharLastOffset(6, 11, targetChar);
+    try std.testing.expectEqual(10, offset);
+}
+
 test "EditBuffer - wcwidth mode treats multi-codepoint emoji as separate chars" {
     const pool = gp.initGlobalPool(std.testing.allocator);
     defer gp.deinitGlobalPool();
