@@ -528,6 +528,7 @@ pub fn findAsciiCharLastOffsetBetweenOffsets(
         col_offset: *u32,
         start: u32,
         end: u32,
+        target_char: *const u8,
         last_target_offset: *u32,
         is_matched: *bool,
         fn segment_callback(ctx_ptr: *anyopaque, line_idx: u32, chunk: *const TextChunk, chunk_idx_in_line: u32) void {
@@ -567,14 +568,17 @@ pub fn findAsciiCharLastOffsetBetweenOffsets(
                 const actual_end = @min(byte_end, @as(u32, @intCast(chunk_bytes.len)));
                 const selected_bytes = chunk_bytes[byte_start..actual_end];
 
-                var i: u32 = selected_bytes.len - 1;
-                while (i >= 0) : (i -= 1) {
-                    if (selected_bytes[i] == target_char) {
-                        const char_offset = chunk_start_offset + local_start_col + utf8.getWidthAt(selected_bytes, i, ctx.tab_width, .unicode);
+                var cur_offset: u32 = 0;
+                var cur_idx: u32 = 0;
+                while (cur_idx < @as(u32, @intCast(selected_bytes.len))) {
+                    const cur_width = utf8.getWidthAt(selected_bytes, i, ctx.tab_width, .unicode);
+                    if (selected_bytes[i] == ctx.target_char.*) {
+                        const char_offset = chunk_start_offset + local_start_col + cur_width;
                         ctx.last_target_offset.* = char_offset;
                         ctx.is_matched.* = true;
-                        break;
                     }
+                    cur_idx += cur_width;
+                    cur_offset += 1;
                 }
             }
 
@@ -596,11 +600,12 @@ pub fn findAsciiCharLastOffsetBetweenOffsets(
         .col_offset = &col_offset,
         .start = start_offset,
         .end = end_offset,
+        .target_char = &target_char,
         .last_target_offset = &last_target_offset,
         .is_matched = &is_matched,
     };
 
     walkLinesAndSegments(rope, &ctx, Context.segment_callback, Context.line_end_callback);
 
-    return if (is_matched) last_target_offset else -1;
+    return if (is_matched) @as(i32, @intCast(last_target_offset)) else -1;
 }
