@@ -1174,6 +1174,22 @@ test "EditBuffer - getAsciiCharLastOffset full text" {
     try std.testing.expectEqual(7, offset);
 }
 
+test "EditBuffer - getAsciiCharLastOffset with CJK characters in range" {
+    const pool = gp.initGlobalPool(std.testing.allocator);
+    defer gp.deinitGlobalPool();
+    const link_pool = link.initGlobalLinkPool(std.testing.allocator);
+    defer link.deinitGlobalLinkPool();
+
+    var eb = try EditBuffer.init(std.testing.allocator, pool, link_pool, .wcwidth);
+    defer eb.deinit();
+
+    try eb.insertText("Hello 你好 World");
+
+    const targetChar = 'o';
+    const offset = try eb.getAsciiCharLastOffset(6, 16, targetChar);
+    try std.testing.expectEqual(12, offset);
+}
+
 test "EditBuffer - getAsciiCharLastOffset with emojis in range" {
     const pool = gp.initGlobalPool(std.testing.allocator);
     defer gp.deinitGlobalPool();
