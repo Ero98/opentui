@@ -573,7 +573,7 @@ pub fn findAsciiCharLastOffsetBetweenOffsets(
                 while (cur_idx < @as(u32, @intCast(selected_bytes.len))) {
                     const cur_width = utf8.getWidthAt(selected_bytes, i, ctx.tab_width, .unicode);
                     if (selected_bytes[i] == ctx.target_char.*) {
-                        const char_offset = chunk_start_offset + local_start_col + cur_width;
+                        const char_offset = chunk_start_offset + local_start_col + cur_offset;
                         ctx.last_target_offset.* = char_offset;
                         ctx.is_matched.* = true;
                     }
