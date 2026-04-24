@@ -71,6 +71,22 @@ test "parseXtversion - full ghostty response" {
     try testing.expect(term.term_info.from_xtversion);
 }
 
+test "processCapabilityResponse captures startup cursor report before home probes" {
+    var term = Terminal.init(.{});
+    term.startup_cursor_query_pending = true;
+    term.startup_cursor_query_captured = false;
+
+    term.processCapabilityResponse("\x1b[7;11R\x1b[1;2R\x1b[1;3R");
+
+    const cursor = term.getCursorPosition();
+    try testing.expectEqual(@as(u32, 11), cursor.x);
+    try testing.expectEqual(@as(u32, 7), cursor.y);
+    try testing.expect(term.startup_cursor_query_captured);
+    try testing.expect(!term.startup_cursor_query_pending);
+    try testing.expect(term.caps.explicit_width);
+    try testing.expect(term.caps.scaled_text);
+}
+
 test "environment variables - should be overridden by xtversion" {
     var term = Terminal.init(.{});
 
@@ -94,22 +110,33 @@ test "environment variables - should be overridden by xtversion" {
     try testing.expect(term.term_info.from_xtversion);
 }
 
-test "remote ignores env overrides but accepts capability responses" {
+test "remote without forwarded env map ignores local env overrides" {
+    const term = Terminal.init(.{ .remote = true });
+
+    try testing.expect(!term.in_tmux);
+    try testing.expect(!term.caps.osc52);
+    try testing.expect(!term.caps.explicit_cursor_positioning);
+}
+
+test "remote applies forwarded env overrides and capability responses" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     var env = std.process.EnvMap.init(testing.allocator);
     defer env.deinit();
     try env.put("TMUX", "/tmp/tmux-1000/default,12345,0");
+    try env.put("TERM", "screen-256color");
     try env.put("TERM_PROGRAM", "iTerm.app");
     try env.put("WT_SESSION", "test-session");
 
     var term = Terminal.init(.{ .remote = true, .env_map = &env });
 
-    try testing.expect(!term.in_tmux);
-    try testing.expect(!term.caps.osc52);
-    try testing.expect(!term.caps.explicit_cursor_positioning);
+    try testing.expect(term.in_tmux);
+    try testing.expect(term.caps.osc52);
+    try testing.expect(term.caps.explicit_cursor_positioning);
+    try testing.expect(term.caps.ansi256);
 
     term.processCapabilityResponse("\x1bP>|kitty(0.40.1)\x1b\\");
+    try testing.expect(term.caps.rgb);
     try testing.expect(term.caps.osc52);
 }
 
@@ -162,6 +189,22 @@ test "environment overrides - does not enable hyperlinks for WSL non-xterm terms
     const term = Terminal.init(.{ .env_map = &env });
 
     try testing.expect(!term.caps.hyperlinks);
+}
+
+test "setHostEnvVar detects ansi256 separately from rgb" {
+    var env = std.process.EnvMap.init(testing.allocator);
+    defer env.deinit();
+    try env.put("TERM", "screen-256color");
+
+    var term = Terminal.init(.{ .env_map = &env });
+    defer term.deinit();
+
+    try testing.expect(term.caps.ansi256);
+    try testing.expect(!term.caps.rgb);
+
+    try term.setHostEnvVar(testing.allocator, "COLORTERM", "truecolor");
+    try testing.expect(term.caps.rgb);
+    try testing.expect(term.caps.ansi256);
 }
 
 test "parseXtversion - terminal name only" {
@@ -237,8 +280,13 @@ test "queryTerminalSend - sends unwrapped queries when not in tmux" {
 
     const output = writer.getWritten();
 
+    const idx_osc_theme_queries = std.mem.indexOf(u8, output, ansi.ANSI.oscThemeQueries).?;
+    const idx_xtversion = std.mem.indexOf(u8, output, "\x1b[>0q").?;
+
     // Should contain xtversion
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[>0q") != null);
+    try testing.expect(idx_osc_theme_queries < idx_xtversion);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b[?996n") == null);
 
     // Should contain unwrapped DECRQM queries (single ESC)
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[?1016$p") != null);
@@ -250,6 +298,7 @@ test "queryTerminalSend - sends unwrapped queries when not in tmux" {
 
     // Should mark capability queries as pending
     try testing.expect(term.capability_queries_pending);
+    try testing.expect(term.theme_queries_pending);
 }
 
 test "queryTerminalSend - sends DCS wrapped queries when in tmux" {
@@ -268,8 +317,13 @@ test "queryTerminalSend - sends DCS wrapped queries when in tmux" {
 
     const output = writer.getWritten();
 
+    const idx_osc_theme_queries = std.mem.indexOf(u8, output, ansi.ANSI.oscThemeQueriesTmux).?;
+    const idx_xtversion = std.mem.indexOf(u8, output, "\x1b[>0q").?;
+
     // Should contain xtversion (unwrapped - used for detection)
     try testing.expect(std.mem.indexOf(u8, output, "\x1b[>0q") != null);
+    try testing.expect(idx_osc_theme_queries < idx_xtversion);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b[?996n") == null);
 
     // Should contain tmux DCS wrapper start and doubled ESC for queries
     // wrapForTmux wraps all queries together with one DCS envelope
@@ -277,6 +331,7 @@ test "queryTerminalSend - sends DCS wrapped queries when in tmux" {
 
     // Should NOT mark capability queries as pending (already sent wrapped)
     try testing.expect(!term.capability_queries_pending);
+    try testing.expect(!term.theme_queries_pending);
 }
 
 test "sendPendingQueries - sends wrapped queries after tmux detected via xtversion" {
@@ -457,6 +512,30 @@ test "processCapabilityResponse - ghostty does not set explicit_cursor_positioni
     const response = "\x1bP>|ghostty 1.1.3\x1b\\";
     term.processCapabilityResponse(response);
 
+    try testing.expect(!term.caps.explicit_cursor_positioning);
+}
+
+test "processCapabilityResponse - wezterm applies osc52 and hyperlink heuristics" {
+    var term: Terminal = .{};
+
+    const response = "\x1bP>|wezterm\x1b\\";
+    term.processCapabilityResponse(response);
+
+    try testing.expect(!term.caps.rgb);
+    try testing.expect(!term.caps.ansi256);
+    try testing.expect(term.caps.osc52);
+    try testing.expect(term.caps.hyperlinks);
+}
+
+test "processCapabilityResponse - foot applies osc52 heuristic without explicit cursor positioning" {
+    var term: Terminal = .{};
+
+    const response = "\x1bP>|foot 1.17.2\x1b\\";
+    term.processCapabilityResponse(response);
+
+    try testing.expect(!term.caps.rgb);
+    try testing.expect(!term.caps.ansi256);
+    try testing.expect(term.caps.osc52);
     try testing.expect(!term.caps.explicit_cursor_positioning);
 }
 
@@ -692,6 +771,48 @@ test "queryTerminalSend - sends OSC 66 queries when OPENTUI_FORCE_EXPLICIT_WIDTH
     // Verify the capability was forced on
     try testing.expect(term.caps.explicit_width);
     try testing.expect(!term.skip_explicit_width_query);
+}
+
+test "enableDetectedFeatures - sends initial theme queries" {
+    var env = std.process.EnvMap.init(testing.allocator);
+    defer env.deinit();
+
+    var term = Terminal.init(.{ .env_map = &env });
+    var writer = TestWriter.init(testing.allocator);
+    defer writer.deinit();
+
+    try term.enableDetectedFeatures(&writer, false);
+
+    const output = writer.getWritten();
+
+    try testing.expect(std.mem.indexOf(u8, output, ansi.ANSI.colorSchemeSet) != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b]10;?\x07") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b]11;?\x07") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b[?996n") == null);
+    try testing.expect(term.theme_queries_pending);
+    try testing.expect(term.state.theme_queries_sent);
+}
+
+test "sendPendingQueries - sends wrapped OSC theme queries after tmux detected via xtversion" {
+    var term = Terminal.init(.{});
+    term.in_tmux = false;
+    term.theme_queries_pending = true;
+
+    term.term_info.from_xtversion = true;
+    term.term_info.name_len = 4;
+    @memcpy(term.term_info.name[0..4], "tmux");
+
+    var writer = TestWriter.init(testing.allocator);
+    defer writer.deinit();
+
+    const did_send = try term.sendPendingQueries(&writer);
+
+    try testing.expect(did_send);
+
+    const output = writer.getWritten();
+    try testing.expect(std.mem.indexOf(u8, output, "\x1bPtmux;\x1b\x1b]10;?\x07") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\x1b\x1b]11;?\x07") != null);
+    try testing.expect(!term.theme_queries_pending);
 }
 
 test "setMouseMode - enable without movement keeps click/drag only" {

@@ -15,6 +15,7 @@ pub const Capabilities = struct {
     kitty_keyboard: bool = false,
     kitty_graphics: bool = false,
     rgb: bool = false,
+    ansi256: bool = false,
     unicode: WidthMethod = .unicode,
     sgr_pixels: bool = false,
     color_scheme_updates: bool = false,
@@ -106,6 +107,9 @@ skip_graphics_query: bool = false,
 skip_explicit_width_query: bool = false,
 graphics_query_pending: bool = false,
 capability_queries_pending: bool = false,
+theme_queries_pending: bool = false,
+startup_cursor_query_pending: bool = false,
+startup_cursor_query_captured: bool = false,
 
 state: struct {
     alt_screen: bool = false,
@@ -117,6 +121,7 @@ state: struct {
     mouse_was_enabled: bool = false,
     pixel_mouse: bool = false,
     color_scheme_updates: bool = false,
+    theme_queries_sent: bool = false,
     focus_tracking: bool = false,
     modify_other_keys: bool = false,
     mouse_pointer: MousePointerStyle = .default,
@@ -209,6 +214,12 @@ pub fn resetState(self: *Terminal, tty: anytype) !void {
     }
 
     self.setTerminalTitle(tty, "");
+
+    // OSC 111 is intentionally disabled for now. In Ghostty, sending the
+    // reset alone is enough to poison later OSC 11 background reporting for
+    // system light/dark theme changes, which breaks theme detection on the
+    // next app startup even though the immediate reset appears to work.
+    // try tty.writeAll(ansi.ANSI.resetTerminalBgColor);
 }
 
 pub fn enterAltScreen(self: *Terminal, tty: anytype) !void {
@@ -225,11 +236,26 @@ pub fn queryTerminalSend(self: *Terminal, tty: anytype) !void {
     self.checkEnvironmentOverrides();
     self.graphics_query_pending = !self.skip_graphics_query;
     self.capability_queries_pending = false;
+    self.theme_queries_pending = false;
+    self.startup_cursor_query_pending = true;
+    self.startup_cursor_query_captured = false;
+
+    // We intentionally do not send CSI ?996n here. Terminals disagree on the
+    // meaning and reliability of the ?997 reply, so startup theme detection is
+    // derived from fresh OSC 10/11 fg/bg colors instead.
+    try self.setColorSchemeUpdates(tty, true);
+
+    try self.queryThemeColors(tty);
+    self.theme_queries_pending = !self.in_tmux;
+    self.state.theme_queries_sent = true;
 
     // Send xtversion first (doesn't need DCS wrapping - used for tmux detection)
     try tty.writeAll(ansi.ANSI.xtversion ++
         ansi.ANSI.hideCursor ++
         ansi.ANSI.saveCursorState);
+
+    // Capture the current cursor position before temporary home-position queries.
+    try tty.writeAll(ansi.ANSI.cursorPositionRequest);
 
     if (self.in_tmux) {
         try tty.writeAll(ansi.ANSI.capabilityQueriesTmux);
@@ -275,6 +301,14 @@ pub fn sendPendingQueries(self: *Terminal, tty: anytype) !bool {
         sent = true;
     }
 
+    if (self.theme_queries_pending) {
+        if (self.term_info.from_xtversion and is_tmux) {
+            try tty.writeAll(ansi.ANSI.oscThemeQueriesTmux);
+            sent = true;
+        }
+        self.theme_queries_pending = false;
+    }
+
     return sent;
 }
 
@@ -282,6 +316,7 @@ pub fn enableDetectedFeatures(self: *Terminal, tty: anytype, use_kitty_keyboard:
     if (builtin.os.tag == .windows) {
         // Windows-specific defaults for ConPTY
         self.caps.rgb = true;
+        self.caps.ansi256 = true;
         self.caps.bracketed_paste = true;
     }
 
@@ -310,9 +345,29 @@ pub fn enableDetectedFeatures(self: *Terminal, tty: anytype, use_kitty_keyboard:
         try self.setFocusTracking(tty, true);
     }
 
+    const is_tmux = self.in_tmux or self.isXtversionTmux();
+
     if (!self.state.color_scheme_updates) {
         try self.setColorSchemeUpdates(tty, true);
-        try tty.writeAll(ansi.ANSI.colorSchemeRequest);
+    }
+
+    if (!self.state.theme_queries_sent) {
+        try self.queryThemeColors(tty);
+        self.theme_queries_pending = !is_tmux;
+        self.state.theme_queries_sent = true;
+    }
+}
+
+pub fn queryThemeColors(self: *Terminal, tty: anytype) !void {
+    const is_tmux = self.in_tmux or self.isXtversionTmux();
+
+    // We only use the ?997 notification as a refresh trigger. The actual theme
+    // mode is derived from the returned OSC 10/11 fg/bg colors, so callers
+    // should query those colors directly instead of sending CSI ?996n.
+    if (is_tmux) {
+        try tty.writeAll(ansi.ANSI.oscThemeQueriesTmux);
+    } else {
+        try tty.writeAll(ansi.ANSI.oscThemeQueries);
     }
 }
 
@@ -325,15 +380,16 @@ fn checkEnvironmentOverrides(self: *Terminal) void {
     self.caps.bracketed_paste = true;
 
     if (self.caps.rgb) {
+        self.caps.ansi256 = true;
         self.caps.hyperlinks = true;
     }
 
-    if (self.opts.remote) {
-        return;
-    }
-
     var env_map_storage: ?std.process.EnvMap = null;
-    const env_map: *const std.process.EnvMap = self.opts.env_map orelse blk: {
+    const maybe_env_map: ?*const std.process.EnvMap = self.opts.env_map orelse blk: {
+        if (self.opts.remote) {
+            break :blk null;
+        }
+
         env_map_storage = std.process.getEnvMap(std.heap.page_allocator) catch |err| {
             logger.err("Failed to get environment map: {}", .{err});
             return;
@@ -341,6 +397,12 @@ fn checkEnvironmentOverrides(self: *Terminal) void {
         break :blk &env_map_storage.?;
     };
     defer if (env_map_storage) |*map| map.deinit();
+
+    if (maybe_env_map == null) {
+        return;
+    }
+
+    const env_map = maybe_env_map.?;
 
     if (!self.term_info.from_xtversion) {
         if (env_map.get("TMUX")) |_| {
@@ -360,6 +422,12 @@ fn checkEnvironmentOverrides(self: *Terminal) void {
             if (std.mem.indexOf(u8, term, "alacritty") != null) {
                 self.caps.explicit_cursor_positioning = true;
             }
+        }
+    }
+
+    if (env_map.get("TERM")) |term| {
+        if (std.ascii.indexOfIgnoreCase(term, "256color") != null) {
+            self.caps.ansi256 = true;
         }
     }
 
@@ -411,6 +479,7 @@ fn checkEnvironmentOverrides(self: *Terminal) void {
             std.mem.eql(u8, colorterm, "24bit"))
         {
             self.caps.rgb = true;
+            self.caps.ansi256 = true;
         }
     }
 
@@ -676,24 +745,55 @@ pub fn processCapabilityResponse(self: *Terminal, response: []const u8) void {
         self.caps.bracketed_paste = true;
     }
 
-    // Explicit width detection - cursor position report [1;NR where N >= 2 means explicit width supported
-    // We look for ESC[1; followed by a digit >= 2
-    // This handles cases where the cursor isn't at exact home position when queries are sent
-    if (std.mem.indexOf(u8, response, "\x1b[1;")) |pos| {
-        const after = response[pos + 4 ..];
-        if (after.len > 0) {
-            var end: usize = 0;
-            while (end < after.len and after[end] >= '0' and after[end] <= '9') : (end += 1) {}
-            if (end > 0 and end < after.len and after[end] == 'R') {
-                const col = std.fmt.parseInt(u16, after[0..end], 10) catch 0;
-                if (col >= 2) {
-                    self.caps.explicit_width = true;
-                }
-                if (col >= 3) {
-                    self.caps.scaled_text = true;
-                }
+    // Parse cursor position reports: ESC[row;colR
+    // The first report after queryTerminalSend is the pre-home cursor position.
+    var scan_pos: usize = 0;
+    while (scan_pos < response.len) {
+        const esc_rel = std.mem.indexOf(u8, response[scan_pos..], "\x1b[") orelse break;
+        const esc = scan_pos + esc_rel;
+        var pos = esc + 2;
+
+        const row_start = pos;
+        while (pos < response.len and response[pos] >= '0' and response[pos] <= '9') : (pos += 1) {}
+        if (pos == row_start or pos >= response.len or response[pos] != ';') {
+            scan_pos = esc + 2;
+            continue;
+        }
+
+        const row = std.fmt.parseInt(u16, response[row_start..pos], 10) catch {
+            scan_pos = pos + 1;
+            continue;
+        };
+
+        pos += 1;
+        const col_start = pos;
+        while (pos < response.len and response[pos] >= '0' and response[pos] <= '9') : (pos += 1) {}
+        if (pos == col_start or pos >= response.len or response[pos] != 'R') {
+            scan_pos = col_start;
+            continue;
+        }
+
+        const col = std.fmt.parseInt(u16, response[col_start..pos], 10) catch {
+            scan_pos = pos + 1;
+            continue;
+        };
+
+        if (self.startup_cursor_query_pending and !self.startup_cursor_query_captured and row >= 1 and col >= 1) {
+            self.setCursorPosition(col, row, self.state.cursor.visible);
+            self.startup_cursor_query_captured = true;
+            self.startup_cursor_query_pending = false;
+        }
+
+        if (row == 1) {
+            if (col >= 2) {
+                self.caps.explicit_width = true;
+            }
+            if (col >= 3) {
+                self.caps.scaled_text = true;
             }
         }
+
+        scan_pos = pos + 1;
     }
 
     // Parse xtversion response: ESC P > | name version ESC \
@@ -712,6 +812,7 @@ pub fn processCapabilityResponse(self: *Terminal, response: []const u8) void {
         self.caps.kitty_graphics = true;
         self.caps.unicode = .unicode;
         self.caps.rgb = true;
+        self.caps.ansi256 = true;
         self.caps.sixel = true;
         self.caps.bracketed_paste = true;
         self.caps.hyperlinks = true;
